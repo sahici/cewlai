@@ -83,6 +83,31 @@ export HF_TOKEN=hf_...
 cewlai -u https://example.com --ai -p huggingface
 ```
 
+## opencode (local server)
+
+Instead of calling a cloud provider directly, you can route AI enrichment through a **local `opencode serve`** instance. opencode is not OpenAI-compatible, so this provider talks to opencode's own HTTP API and reuses whatever models/providers you already configured in opencode (e.g. `opencode/big-pickle`, `bankofai/glm-5.3-flash`).
+
+- **Start opencode**: `opencode serve` (default `http://localhost:4096`)
+- **Env var**: none required (auth uses the server's `OPENCODE_SERVER_PASSWORD` if set)
+- **Model format**: `-m providerID/modelID` (slash is optional; defaults to `opencode/`)
+- **Default model**: `big-pickle`
+
+```bash
+opencode serve
+# in another terminal:
+cewlai -u https://example.com --ai -p opencode -m big-pickle
+# or pick a specific configured provider/model:
+cewlai -u https://example.com --ai -p opencode -m bankofai/glm-5.3-flash
+# non-default port:
+cewlai -u https://example.com --ai -p opencode --base-url http://localhost:5000 -m big-pickle
+# list the models opencode exposes to you:
+cewlai --list-models -p opencode
+```
+
+> **Note:** opencode runs a full agent loop, so each batch call is slower than a direct model request. The `--ai-words` target and retry loop in `enrichWithAI` still apply.
+
+> **Privacy:** Because the crawl context never leaves your machine (it only goes to your local opencode server), this is the recommended option for sensitive engagements.
+
 ## Local models (Ollama, LM Studio, vLLM)
 
 Any OpenAI-compatible endpoint works via `--base-url`. No API key needed for local models (pass `dummy` as key).
