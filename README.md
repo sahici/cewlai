@@ -255,6 +255,7 @@ Route AI enrichment through your own **local `opencode serve`** instance instead
 opencode serve
 
 # 2. (recommended for remote/exposed setups) protect it
+# cewlai picks the same variable up, or pass it with --api-key
 export OPENCODE_SERVER_PASSWORD="<a-strong-password>"
 
 # 3. run cewlai through it

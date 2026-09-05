@@ -3,9 +3,12 @@ package ai
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
+	"time"
 )
 
 type modelEntry struct {
@@ -49,7 +52,7 @@ func ListModels(provider, apiKey, baseURL string) {
 			}
 		case "opencode":
 			// opencode lists its own providers/models over /config/providers.
-			listOpenCodeModels(baseURL)
+			listOpenCodeModels(apiKey, baseURL)
 			return
 		}
 	}
@@ -98,9 +101,13 @@ type openCodeModelID struct {
 	Name string `json:"name"`
 }
 
+// openCodeListTimeout bounds the model listing call. Unlike a message, this is
+// a plain lookup, so it should never take long.
+const openCodeListTimeout = 30 * time.Second
+
 // listOpenCodeModels prints the providers/models exposed by a local opencode
 // server via GET /config/providers.
-func listOpenCodeModels(baseURL string) {
+func listOpenCodeModels(apiKey, baseURL string) {
 	if baseURL == "" {
 		baseURL = DefaultOpenCodeBaseURL
 	}
@@ -111,16 +118,30 @@ func listOpenCodeModels(baseURL string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	setOpenCodeAuth(req, opencodeServerPassword(apiKey))
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: openCodeListTimeout}
+	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting to opencode at %s: %v\n", baseURL, err)
 		os.Exit(1)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// Without this the 401 from a password-protected server surfaces as a
+	// confusing JSON parse error instead of an auth problem.
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusUnauthorized {
+			fmt.Fprintf(os.Stderr, "Error: opencode at %s requires a password. Pass it with --api-key or set %s.\n",
+				baseURL, OpenCodeServerPasswordEnv)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: opencode at %s returned status %d\n", baseURL, resp.StatusCode)
+		}
+		os.Exit(1)
+	}
+
 	var data openCodeProvidersResp
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&data); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing opencode response: %v\n", err)
 		os.Exit(1)
 	}
@@ -132,13 +153,19 @@ func listOpenCodeModels(baseURL string) {
 			continue
 		}
 		fmt.Printf("%s:\n", pr.ID)
+		ids := make([]string, 0, len(pr.Models))
 		for id := range pr.Models {
+			ids = append(ids, id)
+		}
+		// Map iteration order is random, sort so successive runs match.
+		sort.Strings(ids)
+		for _, id := range ids {
 			fmt.Printf("  %s/%s\n", pr.ID, id)
 			shown++
 		}
 	}
 	if shown == 0 {
-		fmt.Println("(no provider model list returned; make sure opencode serve is running and providers are configured)")
+		fmt.Fprintln(os.Stderr, "(no provider model list returned; make sure opencode serve is running and providers are configured)")
 	}
 	if def, ok := data.Default["opencode"]; ok {
 		fmt.Fprintf(os.Stderr, "\nDefault (opencode) model: %s\n", def)

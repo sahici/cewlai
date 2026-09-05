@@ -328,3 +328,91 @@ func errString(err error) string {
 	}
 	return err.Error()
 }
+
+// A password-protected `opencode serve` answers 401 unless the request carries
+// HTTP Basic credentials with the literal user "opencode". These cover that.
+
+func TestOpencodeProvider_SendsBasicAuthWhenPasswordSet(t *testing.T) {
+	var gotUser, gotPass string
+	var gotOK bool
+	f := &fakeOpenCodeServer{t: t, message: "alpha, beta"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser, gotPass, gotOK = r.BasicAuth()
+		f.handle(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	p := newOpencodeProvider("hunter2", "", srv.URL)
+	if _, err := p.GenerateWords(context.Background(), &crawler.CrawlResult{}, "sys", 0); err != nil {
+		t.Fatalf("GenerateWords: %v", err)
+	}
+	if !gotOK {
+		t.Fatal("no Basic credentials sent")
+	}
+	if gotUser != openCodeBasicAuthUser {
+		t.Errorf("user = %q, want %q", gotUser, openCodeBasicAuthUser)
+	}
+	if gotPass != "hunter2" {
+		t.Errorf("password = %q, want %q", gotPass, "hunter2")
+	}
+}
+
+func TestOpencodeProvider_NoAuthWhenNoPassword(t *testing.T) {
+	t.Setenv(OpenCodeServerPasswordEnv, "")
+	var sawAuth bool
+	f := &fakeOpenCodeServer{t: t, message: "alpha"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			sawAuth = true
+		}
+		f.handle(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	p := newOpencodeProvider("", "", srv.URL)
+	if _, err := p.GenerateWords(context.Background(), &crawler.CrawlResult{}, "sys", 0); err != nil {
+		t.Fatalf("GenerateWords: %v", err)
+	}
+	if sawAuth {
+		t.Error("Authorization header sent against an unsecured server")
+	}
+}
+
+func TestOpencodeProvider_PasswordFromEnv(t *testing.T) {
+	t.Setenv(OpenCodeServerPasswordEnv, "fromenv")
+	p := newOpencodeProvider("", "", "http://example.invalid")
+	if p.password != "fromenv" {
+		t.Errorf("password = %q, want %q", p.password, "fromenv")
+	}
+}
+
+func TestOpencodeProvider_APIKeyBeatsEnv(t *testing.T) {
+	t.Setenv(OpenCodeServerPasswordEnv, "fromenv")
+	p := newOpencodeProvider("fromflag", "", "http://example.invalid")
+	if p.password != "fromflag" {
+		t.Errorf("password = %q, want %q", p.password, "fromflag")
+	}
+}
+
+func TestParseOpencodeModel_EdgeSlashes(t *testing.T) {
+	cases := []struct {
+		in        string
+		wantProv  string
+		wantModel string
+	}{
+		{"anthropic/claude", "anthropic", "claude"},
+		{"big-pickle", "opencode", "big-pickle"},
+		{"", "opencode", "big-pickle"},
+		{"/big-pickle", "opencode", "big-pickle"},
+		{"big-pickle/", "opencode", "big-pickle"},
+	}
+	for _, c := range cases {
+		prov, model := parseOpencodeModel(c.in)
+		if prov != c.wantProv || model != c.wantModel {
+			t.Errorf("parseOpencodeModel(%q) = %q, %q, want %q, %q", c.in, prov, model, c.wantProv, c.wantModel)
+		}
+		if prov == "" || model == "" {
+			t.Errorf("parseOpencodeModel(%q) produced an empty part, the server rejects those", c.in)
+		}
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -21,6 +22,16 @@ const DefaultOpenCodeBaseURL = "http://localhost:4096"
 // full agent loop, which is slower than a direct model call.
 const openCodeRequestTimeout = 300 * time.Second
 
+// OpenCodeServerPasswordEnv is the environment variable opencode itself uses
+// to protect `opencode serve`. When the server is started with it, every
+// request must carry HTTP Basic credentials with the literal user "opencode"
+// and that value as the password.
+const OpenCodeServerPasswordEnv = "OPENCODE_SERVER_PASSWORD"
+
+// openCodeBasicAuthUser is the only username a password-protected opencode
+// server accepts. Anything else is rejected with 401.
+const openCodeBasicAuthUser = "opencode"
+
 // opencodeProvider talks to a local opencode server's own HTTP API
 // (POST /session, POST /session/{id}/message). It is not OpenAI-compatible,
 // so it does not use the openai SDK.
@@ -28,6 +39,7 @@ type opencodeProvider struct {
 	baseURL    string
 	modelID    string
 	providerID string
+	password   string
 	client     *http.Client
 }
 
@@ -40,9 +52,27 @@ func newOpencodeProvider(apiKey, model, baseURL string) *opencodeProvider {
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		modelID:    modelID,
 		providerID: providerID,
+		password:   opencodeServerPassword(apiKey),
 		client: &http.Client{
 			Timeout: openCodeRequestTimeout,
 		},
+	}
+}
+
+// opencodeServerPassword resolves the server password from --api-key first,
+// then from the environment. An unsecured server needs neither.
+func opencodeServerPassword(apiKey string) string {
+	if apiKey != "" {
+		return apiKey
+	}
+	return os.Getenv(OpenCodeServerPasswordEnv)
+}
+
+// setOpenCodeAuth adds Basic credentials when a password is configured. Sending
+// nothing against an unsecured server is fine, so this is a no-op then.
+func setOpenCodeAuth(req *http.Request, password string) {
+	if password != "" {
+		req.SetBasicAuth(openCodeBasicAuthUser, password)
 	}
 }
 
@@ -54,16 +84,23 @@ func parseOpencodeModel(model string) (providerID, modelID string) {
 	if model == "" {
 		return "opencode", "big-pickle"
 	}
-	if i := strings.IndexByte(model, '/'); i >= 0 {
+	if i := strings.IndexByte(model, '/'); i > 0 && i < len(model)-1 {
 		return model[:i], model[i+1:]
 	}
-	return "opencode", model
+	// A leading or trailing slash would yield an empty providerID or modelID,
+	// which the server rejects, so treat the value as a bare modelID.
+	return "opencode", strings.Trim(model, "/")
 }
 
 // GenerateWords creates a fresh session, sends the user context as a prompt to
 // the configured opencode model, and returns the comma/line separated words
 // found in the text parts of the reply.
-func (p *opencodeProvider) GenerateWords(ctx context.Context, result *crawler.CrawlResult, prompt string, maxTokens int) ([]string, error) {
+//
+// maxTokens is accepted to satisfy AIProvider but has no effect here: the
+// opencode message API (POST /session/{id}/message) exposes no token limit,
+// the underlying model is chosen server side. Callers relying on a hard cap
+// should use a provider that supports one.
+func (p *opencodeProvider) GenerateWords(ctx context.Context, result *crawler.CrawlResult, prompt string, _ int) ([]string, error) {
 	sessionID, err := p.createSession(ctx)
 	if err != nil {
 		return nil, err
@@ -88,6 +125,7 @@ func (p *opencodeProvider) createSession(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("opencode: build session request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	setOpenCodeAuth(req, p.password)
 
 	resp, err := p.client.Do(req)
 	if err != nil {
@@ -112,10 +150,9 @@ func (p *opencodeProvider) createSession(ctx context.Context) (string, error) {
 }
 
 type openCodeMessageRequest struct {
-	Model  *openCodeModel  `json:"model,omitempty"`
-	System string          `json:"system,omitempty"`
-	Parts  []openCodePart  `json:"parts"`
-	Tools  json.RawMessage `json:"tools,omitempty"`
+	Model  *openCodeModel `json:"model,omitempty"`
+	System string         `json:"system,omitempty"`
+	Parts  []openCodePart `json:"parts"`
 }
 
 type openCodeModel struct {
@@ -142,9 +179,6 @@ func (p *opencodeProvider) sendMessage(ctx context.Context, sessionID, prompt, u
 			ModelID:    p.modelID,
 		},
 		System: prompt,
-		// Enable the model to emit structured output when the underlying
-		// opencode version supports it; ignored otherwise.
-		Tools: json.RawMessage("null"),
 		Parts: []openCodePart{
 			{Type: "text", Text: userMessage},
 		},
@@ -161,6 +195,7 @@ func (p *opencodeProvider) sendMessage(ctx context.Context, sessionID, prompt, u
 		return "", fmt.Errorf("opencode: build message request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	setOpenCodeAuth(req, p.password)
 
 	resp, err := p.client.Do(req)
 	if err != nil {

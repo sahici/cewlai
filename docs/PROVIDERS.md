@@ -88,7 +88,7 @@ cewlai -u https://example.com --ai -p huggingface
 Instead of calling a cloud provider directly, you can route AI enrichment through a **local `opencode serve`** instance. opencode is not OpenAI-compatible, so this provider talks to opencode's own HTTP API and reuses whatever models/providers you already configured in opencode (e.g. `opencode/big-pickle`, `bankofai/glm-5.3-flash`).
 
 - **Start opencode**: `opencode serve` (default `http://localhost:4096`)
-- **Env var**: none required (auth uses the server's `OPENCODE_SERVER_PASSWORD` if set)
+- **Env var**: none for an unsecured server. If you started `opencode serve` with `OPENCODE_SERVER_PASSWORD`, give cewlai the same value through `--api-key` or export `OPENCODE_SERVER_PASSWORD` for it too. It is sent as HTTP Basic credentials, which is what the server expects.
 - **Model format**: `-m providerID/modelID` (slash is optional; defaults to `opencode/`)
 - **Default model**: `big-pickle`
 
@@ -102,9 +102,14 @@ cewlai -u https://example.com --ai -p opencode -m bankofai/glm-5.3-flash
 cewlai -u https://example.com --ai -p opencode --base-url http://localhost:5000 -m big-pickle
 # list the models opencode exposes to you:
 cewlai --list-models -p opencode
+# password-protected server:
+OPENCODE_SERVER_PASSWORD=secret opencode serve
+cewlai -u https://example.com --ai -p opencode --api-key secret
 ```
 
 > **Note:** opencode runs a full agent loop, so each batch call is slower than a direct model request. The `--ai-words` target and retry loop in `enrichWithAI` still apply.
+
+> **Note:** `--ai-words` still drives the retry loop here, but the per-request token ceiling it derives is not applied. opencode's message API exposes no token limit, so the cap is whatever the server side model enforces.
 
 > **Privacy:** Because the crawl context never leaves your machine (it only goes to your local opencode server), this is the recommended option for sensitive engagements.
 
